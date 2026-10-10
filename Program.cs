@@ -1,37 +1,32 @@
-// Invertonator — v1.0
+// Invertonator — v1.1
 //
 //   System-wide dark mode for Windows that websites cannot see.
+//
+//   NEW IN v1.1: configurable hotkeys + settings (settings.json next to
+//   the exe, auto-created with defaults). Hotkey format "Ctrl+Alt+F5".
+//   Configurable: all 5 hotkeys · atMode · dimLevel (Dim brightness).
 //
 //   Modes:   F6 cycles the SCREEN transform: Invert → Dim → Off (F5 = on/off)
 //            Invert — full negative; STATIC media (images, thumbnails) and
 //                     browser chrome get true-color holes. Video renders
 //                     hue-inverted but SMOOTH (no capture machinery).
-//            Dim    — out = 0.4·in: blacks stay black, whites go dark.
+//            Dim    — out = dimLevel·in: blacks stay black, whites go dark.
 //                     THE WATCH MODE: true hues, zero hole machinery,
 //                     works with DRM video. No holes.
 //            Off    — identity
 //
-//   DESIGN NOTE (v1.0): video/player holes were removed deliberately.
-//   The windowed magnifier re-captures + re-renders its source region
-//   every refresh — a real per-frame CPU cost that makes video lag on
-//   integrated graphics, unfixable by tuning. Product split:
-//     Invert = reading/browsing mode (static holes only)
-//     Dim    = watching mode (smooth, true-hue, DRM-safe)
+//   DESIGN NOTE: video/player holes are deliberately disabled. The
+//   windowed magnifier re-captures + re-renders its source region every
+//   refresh — a per-frame CPU cost that makes video lag on integrated
+//   graphics. Product split: Invert = reading/browsing, Dim = watching.
 //
-//   PUMP:    dedicated thread @ 10ms, timeBeginPeriod(1) resolution,
-//            Highest priority. All remaining holes are STATIC media.
-//   WALK:    ONE unified UIA walk per cycle @ 25ms. Chrome rects are
-//            CACHED (invalidated on window move/resize).
+//   PUMP:    dedicated thread, tiered refresh (static holes ~2Hz).
+//   WALK:    ONE unified UIA walk per cycle. Chrome rects are CACHED.
 //   HOLES:   image (named only — ads are unnamed) · graphic ·
-//            link (photo-shaped only) · player by name — NO, player and
-//            video passes are DISABLED in v1.0 (see design note) ·
-//            chrome containers
+//            link (photo-shaped only) · chrome containers
 //   CLICKS:  native (WS_EX_LAYERED + WS_EX_TRANSPARENT hosts)
-//   DUMP:    F9 → UIA tree → tree.txt (warm-up poke, 4000-node cap)
-//   AT MODE: SPI_SETSCREENREADER at startup (Chromium completes its tree)
+//   DUMP:    dump hotkey → UIA tree → tree.txt (warm-up poke, 4000 cap)
 //
-// Hotkeys: Ctrl+Alt+F5 invert on/off · F6 screen mode · F7 pierce ·
-//          F8 quit · F9 tree dump
 // NOTE: browsers need --force-renderer-accessibility for web-content holes.
 
 using System;
@@ -91,10 +86,7 @@ internal static class Program
 
 internal sealed class InvertonatorContext : ApplicationContext
 {
-    private const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000;
-    private const uint HOTKEY_MODS = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
     private const int HK_TOGGLE = 1, HK_MODE = 2, HK_PIERCE = 3, HK_QUIT = 4, HK_DUMP = 5;
-    private const uint VK_F5 = 0x74, VK_F6 = 0x75, VK_F7 = 0x76, VK_F8 = 0x77, VK_F9 = 0x78;
 
     private const uint SPI_SETSCREENREADER = 0x004B;
     private const uint SPIF_UPDATEINIFILE = 0x01;
@@ -106,6 +98,7 @@ internal sealed class InvertonatorContext : ApplicationContext
     private ToolStripMenuItem _miToggle = null!, _miMode = null!, _miPierce = null!;
     private readonly List<string> _failures = new();
     private MediaTracker? _tracker;
+    private Settings _settings = null!;
 
     public InvertonatorContext()
     {
@@ -121,12 +114,24 @@ internal sealed class InvertonatorContext : ApplicationContext
 
     private void Init()
     {
-        Logger.Log("=== starting Invertonator v1.0 ===");
+        Logger.Log("=== starting Invertonator v1.1 ===");
 
-        // Announce as assistive technology: Chromium checks the Windows
-        // screen-reader flag and builds the COMPLETE web-content tree.
-        SpiSetScreenReader(true);
-        Logger.Log("startup: SPI_SETSCREENREADER set");
+        // Settings first — everything below keys off them.
+        _settings = Settings.Load();
+
+        if (_settings.Features.AtMode)
+        {
+            // Optional assistive-technology announcement (system-wide flag;
+            // Chromium builds the COMPLETE web-content tree in response).
+            SpiSetScreenReader(true);
+            Logger.Log("startup: SPI_SETSCREENREADER set (atMode: true)");
+        }
+        else
+        {
+            Logger.Log("startup: atMode off (browser flag handles AX tree)");
+        }
+
+        _engine.SetDimLevel((float)_settings.Features.DimLevel);
 
         if (!_engine.Initialize())
             Fatal("MagInitialize failed (Magnification.dll missing?).");
@@ -139,20 +144,20 @@ internal sealed class InvertonatorContext : ApplicationContext
         _hotkeys = new HotkeyForm();
         _hotkeys.HotkeyPressed += OnHotkey;
 
-        TryRegister(HK_TOGGLE, VK_F5, "Ctrl+Alt+F5");
-        TryRegister(HK_MODE,   VK_F6, "Ctrl+Alt+F6");
-        TryRegister(HK_PIERCE, VK_F7, "Ctrl+Alt+F7");
-        TryRegister(HK_QUIT,   VK_F8, "Ctrl+Alt+F8");
-        TryRegister(HK_DUMP,   VK_F9, "Ctrl+Alt+F9");
+        TryRegisterCfg(HK_TOGGLE, _settings.Hotkeys.Invert, "invert");
+        TryRegisterCfg(HK_MODE,   _settings.Hotkeys.Mode,   "mode");
+        TryRegisterCfg(HK_PIERCE, _settings.Hotkeys.Pierce, "pierce");
+        TryRegisterCfg(HK_QUIT,   _settings.Hotkeys.Quit,   "quit");
+        TryRegisterCfg(HK_DUMP,   _settings.Hotkeys.Dump,   "dump");
 
         // Hotkey status: log always, dialog only on failure.
         if (_failures.Count > 0)
         {
             Logger.Log("startup report: FAILED " + string.Join("; ", _failures));
             MessageBox.Show(
-                "Some hotkeys couldn't be registered (owned by another app):\n\n" +
+                "Some hotkeys couldn't be registered (invalid or owned by another app):\n\n" +
                 string.Join("\n", _failures) +
-                "\n\nUse the tray menu instead, or quit the conflicting app and restart.",
+                "\n\nEdit settings.json next to the exe, or use the tray menu.",
                 "Invertonator — hotkey conflict");
         }
         else
@@ -243,20 +248,28 @@ internal sealed class InvertonatorContext : ApplicationContext
 
     private void UpdateUi()
     {
-        _miToggle.Text = $"Invert: {(_engine.Inverted ? "ON" : "OFF")}  (Ctrl+Alt+F5)";
+        _miToggle.Text = $"Invert: {(_engine.Inverted ? "ON" : "OFF")}  ({_settings.Hotkeys.Invert})";
         _tray!.Text = $"Invertonator — {_engine.ModeName}";
     }
 
-    private void TryRegister(int id, uint vk, string name)
+    private void TryRegisterCfg(int id, string spec, string name)
     {
+        var parsed = Settings.ParseHotkey(spec);
+        if (parsed == null)
+        {
+            _failures.Add($"{name}: invalid hotkey '{spec}' in settings.json");
+            Logger.Log($"FAILED {name}: invalid hotkey '{spec}'");
+            return;
+        }
+        var (mods, vk) = parsed.Value;
         try
         {
-            _hotkeys!.Register(id, HOTKEY_MODS, vk);
-            Logger.Log($"Registered {name} OK");
+            _hotkeys!.Register(id, mods, vk);
+            Logger.Log($"Registered {name} OK ({spec})");
         }
         catch (Win32Exception ex)
         {
-            _failures.Add($"{name}  (Win32 error {ex.NativeErrorCode})");
+            _failures.Add($"{name} ({spec}) — Win32 error {ex.NativeErrorCode}");
             Logger.Log($"FAILED {name}: Win32 error {ex.NativeErrorCode}");
         }
     }
@@ -292,7 +305,6 @@ internal sealed class MediaTracker : IDisposable
     private const double MIN_AR = 0.15, MAX_AR = 6.5;
     private const int MIN_AREA_HARD = 96 * 96;
     private const int DUMP_MAX_NODES = 4000;
-    private const string PLAYER_NAME = "YouTube Video Player";
 
     private static readonly string TreePath =
         System.IO.Path.Combine(
@@ -380,11 +392,10 @@ internal sealed class MediaTracker : IDisposable
                     mi.rcMonitor.Bottom - mi.rcMonitor.Top);
 
                 // ---- MEDIA: one unified walk (classified inside Collect) ----
+                // Video + player elements are NOT collected (design note).
                 var found = new List<Found>();
                 var seen = new HashSet<string>();
 
-                // v1.0: video + player elements are NOT collected (design
-                // note in header) — their condition legs are omitted.
                 var mediaCond = new OrCondition(
                     automation.ConditionFactory.ByControlType(ControlType.Image),
                     automation.ConditionFactory.ByControlType(ControlType.Hyperlink),
@@ -486,13 +497,18 @@ internal sealed class MediaTracker : IDisposable
                 if (r.Width * r.Height > monRect.Width * monRect.Height * MAX_MEDIA_MONITOR_FRAC)
                 { RejectLog($"too big (> {MAX_MEDIA_MONITOR_FRAC:P0} of monitor)", r, lct, nameShort); continue; }
 
+                // v1.1 calibration (ledger-derived): sidebar suggestion cards
+                // are 102x61 (6,222px²); avatars are ~71x72 (5,112px²) — area
+                // alone can't separate them, but WIDTH can: 90px floor admits
+                // suggestions, blocks avatars. STOPGAP — structural fix is
+                // child-image lookup inside links (v1.2 roadmap).
                 if (r.Width * r.Height < MIN_AREA_HARD)
                 { RejectLog($"too small (< {MIN_AREA_HARD}px^2)", r, lct, nameShort); continue; }
 
                 var key = $"{r.X},{r.Y},{r.Width},{r.Height}";
                 if (!seen.Add(key)) continue;
 
-                // v1.0: all remaining holes are static media → never dynamic.
+                // All remaining holes are static media → never dynamic.
                 found.Add(new Found(r, r.Width * r.Height, $"[{lct}] \"{nameShort}\" ({tag})", false));
             }
             catch { /* element vanished mid-walk */ }
@@ -617,10 +633,9 @@ internal sealed class MediaTracker : IDisposable
 }
 
 // =====================================================================
-// MagEngine: fullscreen transform (Invert/Dim/Off) + tiered hole pump
-//   Pump @ 10ms, timeBeginPeriod(1), Highest priority.
-//   v1.0: all holes are static media → refreshed on the STATIC cadence
-//   (~2Hz). Dynamic tier retained in code for v1.1 experiments.
+// MagEngine: fullscreen transform (Invert/Dim/Off) + hole pool
+//   Dim level configurable via settings (SetDimLevel, live-applied).
+//   Pump refreshes static holes at ~2Hz. Single-writer visibility.
 // =====================================================================
 internal sealed class MagEngine : IDisposable
 {
@@ -645,9 +660,8 @@ internal sealed class MagEngine : IDisposable
     private const uint LWA_ALPHA = 2;
     private const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
     private const int MAX_POOLED = 16;
-    private const int PUMP_MS = 10;            // 100Hz budget (dynamic tier: v1.1)
-    private const int STATIC_EVERY = 50;       // static holes refresh ~2Hz
-    private const float DIM_LEVEL = 0.4f;
+    private const int PUMP_MS = 30;            // gentle cadence (static holes)
+    private const int STATIC_EVERY = 20;       // static holes refresh ~1.7Hz
 
     private static readonly float[] InvertMatrix =
     {
@@ -656,15 +670,6 @@ internal sealed class MagEngine : IDisposable
          0,  0, -1, 0, 0,
          0,  0,  0, 1, 0,
          1,  1,  1, 0, 1,
-    };
-
-    private static readonly float[] DimMatrix =
-    {
-        DIM_LEVEL, 0,        0,        0, 0,
-        0,        DIM_LEVEL, 0,        0, 0,
-        0,        0,        DIM_LEVEL, 0, 0,
-        0,        0,        0,        1, 0,
-        0,        0,        0,        0, 1,
     };
 
     private static readonly float[] Identity5x5 =
@@ -678,6 +683,7 @@ internal sealed class MagEngine : IDisposable
     private ScreenMode _mode = ScreenMode.Invert;
     private bool _invertOn = true;
     private bool _pierce;
+    private float _dimLevel = 0.4f;
     private readonly List<Hole> _holes = new();
     private readonly object _holesLock = new();
 
@@ -710,12 +716,6 @@ internal sealed class MagEngine : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string? name);
 
-    [DllImport("winmm.dll")]
-    private static extern uint timeBeginPeriod(uint ms);
-
-    [DllImport("winmm.dll")]
-    private static extern uint timeEndPeriod(uint ms);
-
     public MagEngine()
     {
         StartPump();
@@ -732,10 +732,32 @@ internal sealed class MagEngine : IDisposable
         return _initialized;
     }
 
+    public void SetDimLevel(float level)
+    {
+        if (level is > 0.05f and < 1.0f)
+        {
+            _dimLevel = level;
+            if (_mode == ScreenMode.Dim) ApplyMatrix();   // live-apply in Dim
+        }
+    }
+
+    private float[] BuildDimMatrix()
+    {
+        var d = _dimLevel;
+        return new float[]
+        {
+            d, 0, 0, 0, 0,
+            0, d, 0, 0, 0,
+            0, 0, d, 0, 0,
+            0, 0, 0, 1, 0,
+            0, 0, 0, 0, 1,
+        };
+    }
+
     private bool ApplyMatrix()
     {
         float[] m = !_invertOn || _mode == ScreenMode.Off ? Identity5x5
-                  : _mode == ScreenMode.Dim              ? DimMatrix
+                  : _mode == ScreenMode.Dim              ? BuildDimMatrix()
                   :                                        InvertMatrix;
         return MagSetFullscreenColorEffect((float[])m.Clone());
     }
@@ -768,17 +790,12 @@ internal sealed class MagEngine : IDisposable
         return true;
     }
 
-    // ==== THE pump: 10ms ticks, tiered refresh, highest priority ====
+    // ==== THE pump: visibility reconcile + static hole refresh ====
     private void StartPump()
     {
         _pumpRun = true;
         _pumpThread = new Thread(() =>
         {
-            // Thread.Sleep(16) jitters to 15–32ms without this — the hidden
-            // cause of choppy video. 1ms resolution + Highest priority gives
-            // the pump a real, stable cadence that wins scheduling fights
-            // against the UIA walk.
-            timeBeginPeriod(1);
             try
             {
                 int tick = 0;
@@ -811,10 +828,9 @@ internal sealed class MagEngine : IDisposable
             }
             finally
             {
-                timeEndPeriod(1);
             }
         })
-        { IsBackground = true, Priority = ThreadPriority.Highest };
+        { IsBackground = true };
         _pumpThread.Start();
     }
 

@@ -1,0 +1,13 @@
+{
+  "hotkeys": {
+    "invert": "Ctrl+Alt+F5",
+    "mode": "Ctrl+Alt+F6",
+    "pierce": "Ctrl+Alt+F7",
+    "quit": "Ctrl+Alt+F8",
+    "dump": "Ctrl+Alt+F9"
+  },
+  "features": {
+    "atMode": false,
+    "dimLevel": 0.4
+  }
+}
