@@ -6,7 +6,7 @@
 
 **[⬇ Download the latest release](https://github.com/Phoenix1504e/Invertonator/releases/latest)** — single exe, no install, no .NET required.
 
->Note: Invertonator is being rewritten in Rust for cross-platformsupport (Windows + Linux/X11) and native performance. This C# version (v1.1.1) is *feature-complete for Windows and remains fully supported* -grab it from Releases. The Rust rewrite lives at [Phoenix1504e/Invertonator-rs]() and will become the main version at v2.0
+>Note: Invertonator is being rewritten in Rust for cross-platformsupport (Windows + Linux/X11) and native performance. This C# version (v1.1.1) is *feature-complete for Windows and remains fully supported* -grab it from Releases. The Rust rewrite lives at [Phoenix1504e/Invertonator-rs](https://github.com/Phoenix1504e/Invertonator-rs) and will become the main version at v2.0
 
 ## The problem
 
